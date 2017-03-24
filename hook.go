@@ -19,19 +19,19 @@ var (
 
 type IndexNameFunc func() string
 
+type IndexCleanUpFunc func(map[string]bool)
+
 // ElasticHook is a logrus
 // hook for ElasticSearch
 type ElasticHook struct {
-	client    *elastic.Client
-	host      string
-	index     IndexNameFunc
-	levels    []logrus.Level
-	ctx       context.Context
-	ctxCancel context.CancelFunc
-}
-
-func NewElasticHook(client *elastic.Client, host string, level logrus.Level, index string) (*ElasticHook, error) {
-	return NewElasticHookWithFunc(client, host, level, func() string { return index })
+	client           *elastic.Client
+	host             string
+	index            IndexNameFunc
+	indexCleanUpFunc IndexCleanUpFunc
+	createdIdx       map[string]bool
+	levels           []logrus.Level
+	ctx              context.Context
+	ctxCancel        context.CancelFunc
 }
 
 // NewElasticHook creates new hook
@@ -39,7 +39,18 @@ func NewElasticHook(client *elastic.Client, host string, level logrus.Level, ind
 // host - host of system
 // level - log level
 // index - name of the index in ElasticSearch
-func NewElasticHookWithFunc(client *elastic.Client, host string, level logrus.Level, indexFunc IndexNameFunc) (*ElasticHook, error) {
+func NewElasticHook(client *elastic.Client, host string, level logrus.Level, index string) (*ElasticHook, error) {
+	return NewElasticHookWithFunc(client, host, level, func() string { return index }, func(map[string]bool) {})
+}
+
+// NewElasticHook creates new hook
+// client - ElasticSearch client using gopkg.in/olivere/elastic.v5
+// host - host of system
+// level - log level
+// indexFunc - function to return index name
+// cleanUp - the function is called after each index creation,
+//			to provide ability to cleanup old entries
+func NewElasticHookWithFunc(client *elastic.Client, host string, level logrus.Level, indexFunc IndexNameFunc, cleanUp IndexCleanUpFunc) (*ElasticHook, error) {
 	levels := []logrus.Level{}
 	for _, l := range []logrus.Level{
 		logrus.PanicLevel,
@@ -56,35 +67,32 @@ func NewElasticHookWithFunc(client *elastic.Client, host string, level logrus.Le
 
 	ctx, cancel := context.WithCancel(context.TODO())
 
-	// Use the IndexExists service to check if a specified index exists.
-	exists, err := client.IndexExists(indexFunc()).Do(ctx)
-	if err != nil {
-		// Handle error
-		return nil, err
-	}
-	if !exists {
-		createIndex, err := client.CreateIndex(indexFunc()).Do(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !createIndex.Acknowledged {
-			return nil, ErrCannotCreateIndex
-		}
+	hook := &ElasticHook{
+		client:           client,
+		host:             host,
+		index:            indexFunc,
+		indexCleanUpFunc: cleanUp,
+		createdIdx:       map[string]bool{},
+		levels:           levels,
+		ctx:              ctx,
+		ctxCancel:        cancel,
 	}
 
-	return &ElasticHook{
-		client:    client,
-		host:      host,
-		index:     indexFunc,
-		levels:    levels,
-		ctx:       ctx,
-		ctxCancel: cancel,
-	}, nil
+	if _, err := hook.getIndex(); err != nil {
+		return nil, err
+	}
+
+	return hook, nil
 }
 
 // Fire is required to implement
 // Logrus hook
 func (hook *ElasticHook) Fire(entry *logrus.Entry) error {
+
+	idx, err := hook.getIndex()
+	if err != nil {
+		return err
+	}
 
 	level := entry.Level.String()
 
@@ -102,9 +110,9 @@ func (hook *ElasticHook) Fire(entry *logrus.Entry) error {
 		strings.ToUpper(level),
 	}
 
-	_, err := hook.client.
+	_, err = hook.client.
 		Index().
-		Index(hook.index()).
+		Index(idx).
 		Type("log").
 		BodyJson(msg).
 		Do(hook.ctx)
@@ -122,4 +130,28 @@ func (hook *ElasticHook) Levels() []logrus.Level {
 // elastic
 func (hook *ElasticHook) Cancel() {
 	hook.ctxCancel()
+}
+
+func (hook *ElasticHook) getIndex() (string, error) {
+	idx := hook.index()
+	if !hook.createdIdx[idx] {
+		// Use the IndexExists service to check if a specified index exists.
+		exists, err := hook.client.IndexExists(idx).Do(hook.ctx)
+		if err != nil {
+			// Handle error
+			return "", err
+		}
+		if !exists {
+			createIndex, err := hook.client.CreateIndex(idx).Do(hook.ctx)
+			if err != nil {
+				return "", err
+			}
+			if !createIndex.Acknowledged {
+				return "", ErrCannotCreateIndex
+			}
+		}
+		hook.createdIdx[idx] = true
+		hook.indexCleanUpFunc(hook.createdIdx)
+	}
+	return idx, nil
 }
