@@ -40,7 +40,13 @@ func TestHook(t *testing.T) {
 		log.Panic(err)
 	}
 
-	hook, err := NewElasticHook(client, "localhost", logrus.DebugLevel, "goplag")
+	idx := fmt.Sprintf("%d", time.Now().Unix()/100)
+
+	hook, err := NewElasticHookWithFunc(client, "localhost", logrus.DebugLevel, func() string {
+		return idx
+	}, func(m map[string]bool) {
+
+	})
 	if err != nil {
 		log.Panic(err)
 		t.FailNow()
@@ -51,16 +57,16 @@ func TestHook(t *testing.T) {
 		logrus.Infof("Hustej msg %d", time.Now().Unix())
 	}
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	termQuery := elastic.NewTermQuery("Host", "localhost")
 	searchResult, err := client.Search().
-		Index("goplag").
+		Index(idx).
 		Query(termQuery).
 		Do(context.TODO())
 
 	if searchResult.Hits.TotalHits != 100 {
-		t.Error("Not all logs pushed to elastic")
+		t.Error(fmt.Sprintf("Not all logs pushed to elastic, only pushed %d", searchResult.Hits.TotalHits))
 		t.FailNow()
 	}
 }
