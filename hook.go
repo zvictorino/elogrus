@@ -148,7 +148,7 @@ func syncFireFunc(entry *logrus.Entry, hook *ElasticHook, indexName string) erro
 		Level     string
 	}{
 		hook.host,
-		entry.Time.UTC().Format(time.RFC3339Nano),
+		entry.Time.Format(time.RFC3339),
 		entry.Message,
 		entry.Data,
 		strings.ToUpper(level),
